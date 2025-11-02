@@ -41,7 +41,9 @@ export interface ComparisonResult {
   compliancePercentage: number
   timeDifference: number
   deviations: Deviation[]
-  comparisonMetrics: Record<string, number>
+  comparisonMetrics: Record<string, number | string>
+  stressedJoints?: string[]
+  recommendations?: string[]
 }
 
 export interface Deviation {

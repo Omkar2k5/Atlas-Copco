@@ -4,19 +4,20 @@ import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { UploadBox } from "@/components/upload-box"
 import { useAppStore } from "@/lib/store"
-import { videoApi } from "@/lib/api"
+import { useProcessVideo } from "@/lib/hooks/use-api"
 
 export default function UploadPage() {
   const router = useRouter()
   const { setCurrentSession, addSession } = useAppStore()
+  const { data, loading, error: apiError, progress, processVideo, reset } = useProcessVideo()
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>("")
-  const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState("")
 
   const handleFileSelect = (file: File) => {
     setSelectedFile(file)
     setError("")
+    reset() // Reset previous upload state
 
     // Create preview URL
     const url = URL.createObjectURL(file)
@@ -29,19 +30,21 @@ export default function UploadPage() {
       return
     }
 
-    setIsProcessing(true)
     setError("")
 
     try {
-      // Call API to process video
-      const result = await videoApi.processVideo(selectedFile)
+      // Process video using the backend API
+      const result = await processVideo(selectedFile)
 
-      // Create session
-      const sessionId = crypto.randomUUID()
+      // Create session with backend session_id
       const session = {
-        id: sessionId,
+        id: result.session_id,
         videoFile: selectedFile,
-        analysisResult: result,
+        analysisResult: {
+          keypoints: result.keypoints,
+          embedding: result.embedding,
+          duration: result.duration_seconds,
+        },
         status: "complete" as const,
       }
 
@@ -49,11 +52,9 @@ export default function UploadPage() {
       setCurrentSession(session as any)
 
       // Redirect to analyze page
-      router.push(`/analyze/${sessionId}`)
+      router.push(`/analyze/${result.session_id}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to process video")
-    } finally {
-      setIsProcessing(false)
     }
   }
 
@@ -66,20 +67,35 @@ export default function UploadPage() {
 
       <div className="grid grid-cols-2 gap-8">
         <div className="space-y-4">
-          <UploadBox onFileSelect={handleFileSelect} isLoading={isProcessing} />
+          <UploadBox onFileSelect={handleFileSelect} isLoading={loading} />
 
-          {error && (
+          {(error || apiError) && (
             <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-sm text-red-700">{error}</p>
+              <p className="text-sm text-red-700">{error || apiError}</p>
+            </div>
+          )}
+
+          {loading && progress !== undefined && (
+            <div className="space-y-2">
+              <div className="flex justify-between text-sm text-(--color-text-secondary)">
+                <span>Uploading and processing...</span>
+                <span>{progress}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div
+                  className="bg-(--color-primary) h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
             </div>
           )}
 
           <button
             onClick={handleSubmit}
-            disabled={!selectedFile || isProcessing}
+            disabled={!selectedFile || loading}
             className="w-full px-6 py-3 bg-(--color-primary) text-white font-semibold rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
-            {isProcessing ? "Processing..." : "Analyze Video"}
+            {loading ? "Processing..." : "Analyze Video"}
           </button>
         </div>
 
