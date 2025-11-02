@@ -24,11 +24,8 @@ class VectorDatabase:
         # Create directory if it doesn't exist
         os.makedirs(persist_directory, exist_ok=True)
         
-        # Initialize ChromaDB client with persistence
-        self.client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=persist_directory
-        ))
+        # Initialize ChromaDB client with new API (v0.4+)
+        self.client = chromadb.PersistentClient(path=persist_directory)
         
         # Get or create collection
         self.collection = self.client.get_or_create_collection(
@@ -55,9 +52,7 @@ class VectorDatabase:
             ids=[session_id],
             metadatas=[metadata]
         )
-        
-        # Persist changes
-        self.client.persist()
+        # PersistentClient automatically persists
     
     def query_embedding(
         self,
@@ -115,7 +110,7 @@ class VectorDatabase:
             session_id: Session identifier
         """
         self.collection.delete(ids=[session_id])
-        self.client.persist()
+        # PersistentClient automatically persists
     
     def count(self) -> int:
         """Return the number of embeddings in the collection."""
