@@ -21,7 +21,8 @@ class PoseModel:
             "models"
         )
         
-        if os.path.exists(model_path):
+        saved_model_file = os.path.join(model_path, "saved_model.pb")
+        if os.path.exists(saved_model_file):
             print(f"Loading MoveNet model from {model_path}")
             self.model = tf.saved_model.load(model_path)
             self.movenet = self.model.signatures['serving_default']
@@ -56,11 +57,18 @@ class PoseModel:
         duration_seconds = frame_count / fps if fps > 0 else 0.0
         
         all_keypoints = []
+        frame_skip = 3  # Process every 3rd frame for faster processing
+        current_frame = 0
         
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            # Skip frames for faster processing
+            if current_frame % frame_skip != 0:
+                current_frame += 1
+                continue
             
             # Preprocess frame for MoveNet
             input_image = self._preprocess_frame(frame)
@@ -79,6 +87,7 @@ class PoseModel:
                 frame_keypoints.append([float(x), float(y), float(conf)])
             
             all_keypoints.append(frame_keypoints)
+            current_frame += 1
         
         cap.release()
         

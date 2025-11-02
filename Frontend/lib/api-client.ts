@@ -11,7 +11,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 // Create axios instance with default config
 const apiClient: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 300000, // 5 minutes for video processing
+  timeout: 900000, // 15 minutes for video processing
   headers: {
     'Content-Type': 'application/json',
   },
@@ -118,7 +118,7 @@ export const api = {
     preset?: DTWPreset
   ): Promise<CompareResponse> {
     const params = preset ? { preset } : {};
-    
+
     const response = await apiClient.post<CompareResponse>(
       '/api/compare',
       {

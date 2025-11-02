@@ -61,6 +61,7 @@ download_movenet.py
 # Environment variables
 .env
 .env.local
+.kiro
 
 # Test files
 test_*.py
