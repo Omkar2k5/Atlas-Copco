@@ -3,6 +3,7 @@ uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 pydantic==2.5.0
 numpy==1.26.2
+scipy>=1.11.0
 opencv-python==4.8.1.78
 tensorflow>=2.18.0
 tensorflow-hub>=0.16.0
@@ -10,3 +11,5 @@ tensorflow-probability>=0.25.0
 chromadb==0.4.18
 python-jose[cryptography]==3.3.0
 aiofiles==23.2.1
+# Optional: for FastDTW approximation (very long sequences)
+# fastdtw>=0.3.2

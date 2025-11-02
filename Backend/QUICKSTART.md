@@ -74,7 +74,7 @@ Returns:
 - `embedding` - 256-dim vector for comparison
 - `duration_seconds` - Video length
 
-### Workflow 2: Compare Two Sessions
+### Workflow 2: Compare Two Sessions (DTW-based)
 
 ```bash
 curl -X POST "http://localhost:8000/api/compare" \
@@ -86,11 +86,13 @@ curl -X POST "http://localhost:8000/api/compare" \
 ```
 
 Returns:
-- `similarity_score` - 0-1 (higher = more similar)
+- `similarity_score` - 0-1 (higher = more similar) via **DTW alignment**
 - `time_difference_seconds` - Timing comparison
-- `movement_deviation_vector` - Per-joint differences
-- `stressed_joints` - Problem areas
+- `movement_deviation_vector` - Per-joint differences (aligned frames)
+- `stressed_joints` - Problem areas detected
 - `recommended_improvements` - Actionable feedback
+
+**New:** Uses Dynamic Time Warping for robust comparison!
 
 ### Workflow 3: Retrieve Session
 

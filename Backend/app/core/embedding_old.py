@@ -56,6 +56,8 @@ def angle_between(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
 
 def compute_joint_angles(kp_norm: np.ndarray) -> np.ndarray:
     """Compute a vector of selected joint angles (radians) from normalized (17,2) coords."""
+    # Example angles: left_shoulder (elbow-shoulder-hip), right_shoulder, left_elbow (shoulder-elbow-wrist), right_elbow,
+    # left_hip (shoulder-hip-knee), right_hip, left_knee (hip-knee-ankle), right_knee.
     a = []
     # left_shoulder angle: left_elbow - left_shoulder - left_hip
     a.append(angle_between(kp_norm[KP["left_elbow"]], kp_norm[KP["left_shoulder"]], kp_norm[KP["left_hip"]]))
@@ -76,28 +78,17 @@ def frame_feature_from_keypoints(keypoints_frame: List[Tuple[float,float,float]]
     kp = to_np(keypoints_frame)  # (17,3)
     coords_norm = normalize_keypoints(kp)  # (17,2)
     angles = compute_joint_angles(coords_norm)  # (8,)
-    # Flatten normalized coords (x,y) for selected joints
+    # Flatten normalized coords (x,y) for selected joints (optionally all joints)
+    # Use only joint positions without confidence to keep features stable; scale later if needed
     pos_flat = coords_norm.flatten()  # 34 dims
     # Combine angles + pos -> final vector
     feat = np.concatenate([angles, pos_flat])  # 8 + 34 = 42 dims
     return feat
 
-def sequence_to_feature_matrix(frames: List[Dict], sample_rate: int = 1) -> np.ndarray:
-    """
-    Convert list of frames (each with 'keypoints' list) to (n_frames, feature_dim) matrix.
-    
-    Args:
-        frames: List of frame dictionaries with 'keypoints'
-        sample_rate: Process every Nth frame (1=all frames, 2=every 2nd, etc.)
-                     Recommended: 1-3 for normal speed, 2-5 for fast motion
-    
-    Returns:
-        Feature matrix (n_sampled_frames, 42)
-    """
+def sequence_to_feature_matrix(frames: List[Dict]) -> np.ndarray:
+    """Convert list of frames (each with 'keypoints' list) to (n_frames, feature_dim) matrix."""
     feats = []
-    for idx, f in enumerate(frames):
-        if idx % sample_rate != 0:
-            continue
+    for f in frames:
         kp = f.get("keypoints", [])
         feat = frame_feature_from_keypoints(kp)
         feats.append(feat)
@@ -116,28 +107,127 @@ def temporal_smoothing(feat_matrix: np.ndarray, window: int = 3) -> np.ndarray:
     return out
 
 
-# Legacy function for backward compatibility
+# Legacy function for backward compatibility with existing API
+def calculate_joint_angles_legacy(keypoints: List[List[List[float]]]) -> np.ndarray:
+    """
+    Calculate joint angles for each frame.
+    
+    Args:
+        keypoints: List[frame][joint][x, y, confidence]
+        
+    Returns:
+        Array of shape (num_frames, num_angles) containing joint angles
+    """
+    angles_per_frame = []
+    
+    for frame_kpts in keypoints:
+        frame_angles = []
+        
+        # Convert to numpy for easier computation
+        kpts = np.array(frame_kpts)[:, :2]  # Take only x, y
+        
+        # Define joint triplets for angle calculation (parent, joint, child)
+        # MoveNet indices (17 keypoints)
+        angle_triplets = [
+            # Arms
+            (5, 7, 9),    # left shoulder, elbow, wrist
+            (6, 8, 10),   # right shoulder, elbow, wrist
+            # Legs
+            (11, 13, 15), # left hip, knee, ankle
+            (12, 14, 16), # right hip, knee, ankle
+            # Torso
+            (5, 11, 13),  # left shoulder, hip, knee
+            (6, 12, 14),  # right shoulder, hip, knee
+            # Neck/Shoulder
+            (0, 5, 7),    # nose, left shoulder, left elbow
+            (0, 6, 8),    # nose, right shoulder, right elbow
+        ]
+        
+        for p1_idx, p2_idx, p3_idx in angle_triplets:
+            p1, p2, p3 = kpts[p1_idx], kpts[p2_idx], kpts[p3_idx]
+            
+            # Calculate vectors
+            v1 = p1 - p2
+            v2 = p3 - p2
+            
+            # Calculate angle using dot product
+            cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
+            angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+            frame_angles.append(angle)
+        
+        angles_per_frame.append(frame_angles)
+    
+    return np.array(angles_per_frame)
+
+
+def calculate_velocity_features(keypoints: List[List[List[float]]]) -> np.ndarray:
+    """
+    Calculate velocity features (frame-to-frame movement).
+    
+    Args:
+        keypoints: List[frame][joint][x, y, confidence]
+        
+    Returns:
+        Velocity features array
+    """
+    kpts_array = np.array(keypoints)[:, :, :2]  # (frames, joints, 2)
+    
+    # Calculate frame-to-frame differences
+    velocities = np.diff(kpts_array, axis=0)
+    
+    # Calculate velocity magnitude per joint
+    velocity_magnitudes = np.linalg.norm(velocities, axis=2)  # (frames-1, joints)
+    
+    return velocity_magnitudes
+
+
 def sequence_to_embedding(keypoints: List[List[List[float]]]) -> List[float]:
     """
-    Legacy function: Convert keypoint sequence to fixed-length embedding.
-    Uses statistical aggregation for backward compatibility.
+    Convert variable-length keypoint sequence to fixed-length embedding vector.
+    
+    Strategy:
+    1. Calculate joint angles for each frame
+    2. Calculate velocity features
+    3. Compute statistical features (mean, std, min, max) across time
+    4. Flatten into single embedding vector
+    
+    Args:
+        keypoints: List[frame][joint][x, y, confidence]
+        
+    Returns:
+        Fixed-length embedding vector as list
     """
     if not keypoints or len(keypoints) == 0:
+        # Return zero embedding if no keypoints
         return [0.0] * 256
     
-    # Convert to frame format
-    frames = [{"keypoints": kp} for kp in keypoints]
-    feat_matrix = sequence_to_feature_matrix(frames)
+    # Calculate joint angles
+    angles = calculate_joint_angles(keypoints)  # (num_frames, num_angles)
+    
+    # Calculate velocity features
+    velocities = calculate_velocity_features(keypoints)  # (num_frames-1, num_joints)
     
     # Statistical aggregation
     features = []
-    if feat_matrix.shape[0] > 0:
-        features.extend(np.mean(feat_matrix, axis=0).tolist())
-        features.extend(np.std(feat_matrix, axis=0).tolist())
-        features.extend(np.min(feat_matrix, axis=0).tolist())
-        features.extend(np.max(feat_matrix, axis=0).tolist())
     
-    # Pad or truncate to 256 dims
+    # Angle statistics
+    if angles.shape[0] > 0:
+        features.extend(np.mean(angles, axis=0).tolist())
+        features.extend(np.std(angles, axis=0).tolist())
+        features.extend(np.min(angles, axis=0).tolist())
+        features.extend(np.max(angles, axis=0).tolist())
+    
+    # Velocity statistics
+    if velocities.shape[0] > 0:
+        features.extend(np.mean(velocities, axis=0).tolist())
+        features.extend(np.std(velocities, axis=0).tolist())
+    
+    # Positional statistics (using raw keypoints)
+    kpts_array = np.array(keypoints)[:, :, :2]  # (frames, joints, 2)
+    features.extend(np.mean(kpts_array, axis=0).flatten().tolist())
+    features.extend(np.std(kpts_array, axis=0).flatten().tolist())
+    
+    # Pad or truncate to fixed size (256 dimensions)
     target_size = 256
     if len(features) < target_size:
         features.extend([0.0] * (target_size - len(features)))
@@ -147,9 +237,17 @@ def sequence_to_embedding(keypoints: List[List[List[float]]]) -> List[float]:
     return features
 
 
-# Alias for compatibility
 def cosine_similarity(embedding1: List[float], embedding2: List[float]) -> float:
-    """Calculate cosine similarity between two embeddings."""
+    """
+    Calculate cosine similarity between two embeddings.
+    
+    Args:
+        embedding1: First embedding vector
+        embedding2: Second embedding vector
+        
+    Returns:
+        Similarity score between 0 and 1
+    """
     vec1 = np.array(embedding1)
     vec2 = np.array(embedding2)
     
@@ -161,4 +259,6 @@ def cosine_similarity(embedding1: List[float], embedding2: List[float]) -> float
         return 0.0
     
     similarity = dot_product / (norm1 * norm2)
+    
+    # Convert from [-1, 1] to [0, 1]
     return (similarity + 1.0) / 2.0

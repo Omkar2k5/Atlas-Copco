@@ -1,157 +1,195 @@
 """
-Metrics Calculation Module
+Metrics Calculation Module with DTW Implementation
 Computes performance metrics, movement deviations, and stressed joints.
 """
 
+from typing import Tuple, List, Dict
 import numpy as np
-from typing import List, Tuple, Dict
 
+def pairwise_distances(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    """Compute pairwise Euclidean distances between frames of A (n, d) and B (m, d)."""
+    try:
+        from scipy.spatial.distance import cdist
+        return cdist(A, B, metric='euclidean')
+    except Exception:
+        # fallback
+        d = np.sum((A[:, None, :] - B[None, :, :])**2, axis=2)
+        return np.sqrt(d)
 
-def calculate_movement_deviation(
-    reference_keypoints: List[List[List[float]]],
-    user_keypoints: List[List[List[float]]]
-) -> Tuple[List[float], List[str]]:
+def dtw_distance_matrix(D: np.ndarray, window: int = None) -> Tuple[float, List[Tuple[int,int]], np.ndarray]:
     """
-    Calculate per-joint movement deviation between reference and user executions.
+    Dynamic time warping with optional Sakoe-Chiba band constraint.
     
     Args:
-        reference_keypoints: Reference keypoints [frame][joint][x, y, confidence]
-        user_keypoints: User keypoints [frame][joint][x, y, confidence]
-        
+        D: Distance matrix (n x m)
+        window: Sakoe-Chiba window width (None = no constraint)
+                Recommended: 10-20% of max(n,m) for long sequences
+    
     Returns:
-        Tuple of (deviation_vector, stressed_joints)
-        deviation_vector: L2 distance per joint averaged across frames
-        stressed_joints: List of joint names exceeding deviation threshold
+        (total_cost, path, cost_matrix)
     """
-    # Normalize sequence lengths by interpolation
-    ref_array = np.array(reference_keypoints)[:, :, :2]  # (frames, joints, 2)
-    user_array = np.array(user_keypoints)[:, :, :2]
+    n, m = D.shape
+    cost = np.full((n+1, m+1), np.inf, dtype=float)
+    cost[0,0] = 0.0
     
-    ref_frames, num_joints = ref_array.shape[0], ref_array.shape[1]
-    user_frames = user_array.shape[0]
+    # Determine window constraint
+    if window is None:
+        window = max(n, m)  # No constraint
     
-    # Interpolate to match frame counts
-    if ref_frames != user_frames:
-        # Simple linear interpolation
-        ref_indices = np.linspace(0, ref_frames - 1, user_frames)
-        ref_array_interp = np.array([
-            np.array([
-                np.interp(ref_indices, np.arange(ref_frames), ref_array[:, j, coord])
-                for coord in range(2)
-            ]).T
-            for j in range(num_joints)
-        ]).transpose(1, 0, 2)
+    # Fill with Sakoe-Chiba band
+    for i in range(1, n+1):
+        # Compute valid j range for this i
+        j_start = max(1, i - window)
+        j_end = min(m + 1, i + window + 1)
+        
+        for j in range(j_start, j_end):
+            choices = (cost[i-1,j], cost[i,j-1], cost[i-1,j-1])
+            cost[i,j] = D[i-1, j-1] + min(choices)
+    
+    total_cost = cost[n, m]
+    
+    # Backtrack
+    i, j = n, m
+    path = []
+    while i > 0 and j > 0:
+        path.append((i-1, j-1))
+        # determine step
+        neighbors = [(cost[i-1,j-1], i-1,j-1), (cost[i-1,j], i-1,j), (cost[i,j-1], i,j-1)]
+        prev_cost, pi, pj = min(neighbors, key=lambda x: x[0])
+        i, j = pi, pj
+    path.reverse()
+    return float(total_cost), path, cost[1:,1:]
+
+def run_dtw(A: np.ndarray, B: np.ndarray, window: int = None, use_fastdtw: bool = False) -> Dict:
+    """
+    Runs DTW between sequences A (n,d) and B (m,d).
+    
+    Args:
+        A: Reference sequence (n, d)
+        B: User sequence (m, d)
+        window: Sakoe-Chiba window width (None = auto-calculate for long sequences)
+                Recommended: 10-20% of max(n,m)
+        use_fastdtw: Try to use FastDTW approximation if available (faster for long sequences)
+    
+    Returns:
+        Dict with distance, similarity, path, and cost_matrix
+    """
+    if A.size == 0 or B.size == 0:
+        return {"distance": float("inf"), "similarity": 0.0, "path": [], "mapping": []}
+    
+    n, m = A.shape[0], B.shape[0]
+    
+    # Auto-calculate window for long sequences
+    if window is None and max(n, m) > 500:
+        window = int(0.15 * max(n, m))  # 15% window for long sequences
+    
+    # Try FastDTW for very long sequences
+    if use_fastdtw and max(n, m) > 1000:
+        try:
+            from fastdtw import fastdtw
+            distance, path = fastdtw(A, B, dist=lambda x, y: np.linalg.norm(x - y))
+            path_len = len(path) if len(path) > 0 else 1
+            norm_cost = distance / path_len
+            similarity = 1.0 / (1.0 + norm_cost)
+            return {
+                "distance": float(distance),
+                "normalized_distance": float(norm_cost),
+                "similarity": float(similarity),
+                "path": path,
+                "cost_matrix": None,  # FastDTW doesn't return cost matrix
+                "method": "fastdtw"
+            }
+        except ImportError:
+            pass  # Fall back to standard DTW
+    
+    # Standard DTW with optional window
+    D = pairwise_distances(A, B)  # (n,m)
+    total_cost, path, cost_matrix = dtw_distance_matrix(D, window=window)
+    path_len = len(path) if len(path) > 0 else 1
+    norm_cost = total_cost / path_len
+    
+    # similarity mapping: convert to 0..1 where higher=more similar
+    similarity = 1.0 / (1.0 + norm_cost)
+    
+    return {
+        "distance": float(total_cost),
+        "normalized_distance": float(norm_cost),
+        "similarity": float(similarity),
+        "similarity_percentage": float(100 * similarity),  # 0-100 scale
+        "path": path,
+        "cost_matrix": cost_matrix,
+        "method": "dtw" if window is None else f"dtw_window_{window}"
+    }
+
+def compute_time_deviation(frames_meta_A: List[Dict], frames_meta_B: List[Dict], path: List[Tuple[int,int]]) -> Dict:
+    """
+    Using frame timestamps (time_sec) map aligned frames and compute:
+    - average_time_ratio = mean(time_B / time_A) across aligned pairs (helps find speed difference)
+    - total_time_A, total_time_B, ratio
+    """
+    times_A = [f.get("time_sec", i) for i,f in enumerate(frames_meta_A)]
+    times_B = [f.get("time_sec", i) for i,f in enumerate(frames_meta_B)]
+    ratios = []
+    for i,j in path:
+        ta = times_A[i]
+        tb = times_B[j]
+        if ta <= 1e-6:
+            continue
+        ratios.append(tb / ta)
+    if len(ratios) == 0:
+        avg_ratio = 1.0
     else:
-        ref_array_interp = ref_array
-    
-    # Calculate L2 distance per joint across all frames
-    distances = np.linalg.norm(ref_array_interp - user_array, axis=2)  # (frames, joints)
-    deviation_per_joint = np.mean(distances, axis=0)  # (joints,)
-    
-    # Identify stressed joints (deviation > threshold)
-    threshold = np.percentile(deviation_per_joint, 75)  # Top 25% deviations
-    stressed_indices = np.where(deviation_per_joint > threshold)[0]
-    
-    joint_names = get_joint_names()
-    stressed_joints = [joint_names[i] for i in stressed_indices if i < len(joint_names)]
-    
-    return deviation_per_joint.tolist(), stressed_joints
+        avg_ratio = float(np.mean(ratios))
+    total_A = times_A[-1] if times_A else 0.0
+    total_B = times_B[-1] if times_B else 0.0
+    return {"avg_time_ratio": avg_ratio, "total_time_A": total_A, "total_time_B": total_B}
 
+def per_joint_deviation(frames_A: List[Dict], frames_B: List[Dict], path: List[Tuple[int,int]]) -> Dict:
+    """
+    Compute per-joint average L2 deviation across aligned frames.
+    Returns dict {joint_name: avg_deviation}
+    """
+    KP_NAMES = [
+        "nose","left_eye","right_eye","left_ear","right_ear",
+        "left_shoulder","right_shoulder","left_elbow","right_elbow",
+        "left_wrist","right_wrist","left_hip","right_hip",
+        "left_knee","right_knee","left_ankle","right_ankle"
+    ]
+    n_joints = len(KP_NAMES)
+    deviations = np.zeros(n_joints, dtype=float)
+    counts = np.zeros(n_joints, dtype=int)
+    for i,j in path:
+        ka = np.array(frames_A[i]["keypoints"])[:,:2]
+        kb = np.array(frames_B[j]["keypoints"])[:,:2]
+        # both are normalized? assume pre-normalized by embedding pipeline
+        for idx in range(n_joints):
+            if idx >= ka.shape[0] or idx >= kb.shape[0]:
+                continue
+            da = ka[idx]
+            db = kb[idx]
+            d = np.linalg.norm(da - db)
+            deviations[idx] += d
+            counts[idx] += 1
+    avg_dev = {}
+    for idx, name in enumerate(KP_NAMES):
+        avg = float(deviations[idx] / counts[idx]) if counts[idx] > 0 else 0.0
+        avg_dev[name] = avg
+    return avg_dev
 
-def calculate_stressed_joints_ergonomic(
-    keypoints: List[List[List[float]]]
-) -> List[str]:
+def detect_stressed_joints(avg_joint_devs: Dict[str,float], angle_changes_summary: Dict[str,float]=None, thresholds: Dict[str,float]=None) -> List[str]:
     """
-    Identify joints under stress based on ergonomic angle thresholds.
-    
-    Args:
-        keypoints: Keypoints sequence [frame][joint][x, y, confidence]
-        
-    Returns:
-        List of joint names that exceed ergonomic thresholds
+    Simple heuristic: joints with avg deviation above threshold flagged as stressed.
+    thresholds: mapping joint -> threshold (default 0.25)
     """
-    stressed = set()
-    
-    for frame_kpts in keypoints:
-        kpts = np.array(frame_kpts)[:, :2]
-        
-        # Check neck angle (head forward posture)
-        # MoveNet: nose (0), left shoulder (5), right shoulder (6)
-        if len(kpts) < 13:
-            continue  # Skip frames with insufficient keypoints
-        
-        nose = kpts[0]
-        left_shoulder = kpts[5]
-        right_shoulder = kpts[6]
-        shoulder_center = (left_shoulder + right_shoulder) / 2
-        
-        # Neck angle from vertical
-        neck_vector = nose - shoulder_center
-        vertical = np.array([0, -1])
-        cos_angle = np.dot(neck_vector, vertical) / (np.linalg.norm(neck_vector) * np.linalg.norm(vertical) + 1e-8)
-        neck_angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
-        
-        # Threshold: > 30 degrees from vertical
-        if neck_angle > np.radians(30):
-            stressed.add("neck")
-        
-        # Check shoulder elevation
-        # Compare shoulder height with hip height
-        # MoveNet: left hip (11), right hip (12)
-        left_hip = kpts[11]
-        right_hip = kpts[12]
-        
-        shoulder_y = (left_shoulder[1] + right_shoulder[1]) / 2
-        hip_y = (left_hip[1] + right_hip[1]) / 2
-        
-        # If shoulders are elevated (y is smaller in image coordinates)
-        torso_length = abs(shoulder_y - hip_y)
-        if torso_length > 0:
-            # Check if shoulders are raised > 10% of torso length above normal
-            normal_shoulder_y = hip_y - torso_length
-            if shoulder_y < normal_shoulder_y - 0.1 * torso_length:
-                stressed.add("left_shoulder")
-                stressed.add("right_shoulder")
-        
-        # Check elbow angles for awkward positions
-        # MoveNet: left shoulder (5), left elbow (7), left wrist (9)
-        left_shoulder_pos = kpts[5]
-        left_elbow_pos = kpts[7]
-        left_wrist_pos = kpts[9]
-        
-        v1 = left_shoulder_pos - left_elbow_pos
-        v2 = left_wrist_pos - left_elbow_pos
-        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
-        left_elbow_angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
-        
-        # Extreme flexion (< 45 degrees) or full extension (> 170 degrees)
-        if left_elbow_angle < np.radians(45) or left_elbow_angle > np.radians(170):
-            stressed.add("left_elbow")
-        
-        # Right elbow
-        # MoveNet: right shoulder (6), right elbow (8), right wrist (10)
-        right_shoulder_pos = kpts[6]
-        right_elbow_pos = kpts[8]
-        right_wrist_pos = kpts[10]
-        
-        v1 = right_shoulder_pos - right_elbow_pos
-        v2 = right_wrist_pos - right_elbow_pos
-        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8)
-        right_elbow_angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
-        
-        if right_elbow_angle < np.radians(45) or right_elbow_angle > np.radians(170):
-            stressed.add("right_elbow")
-        
-        # Check spine alignment (simplified)
-        # Compare shoulder center to hip center - should be relatively aligned
-        spine_vector = shoulder_center - (left_hip + right_hip) / 2
-        spine_angle = np.arctan2(abs(spine_vector[0]), abs(spine_vector[1]))
-        
-        # Threshold: > 15 degrees from vertical
-        if spine_angle > np.radians(15):
-            stressed.add("spine")
-    
-    return list(stressed)
+    if thresholds is None:
+        thresholds = {k:0.25 for k in avg_joint_devs.keys()}  # default threshold
+    stressed = []
+    for joint, val in avg_joint_devs.items():
+        th = thresholds.get(joint, 0.25)
+        if val > th:
+            stressed.append(joint)
+    # Optionally include angle-based heuristics (e.g., repeated extreme knee flexion)
+    return stressed
 
 
 def generate_recommendations(
