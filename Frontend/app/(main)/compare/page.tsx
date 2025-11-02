@@ -148,7 +148,7 @@ export default function ComparePage() {
       )}
 
       {/* No results message */}
-      {!comparisonResult && !isLoading && (
+      {!comparisonResult && !loading && (
         <div className="text-center py-12 bg-(--color-surface) border border-(--color-border) rounded-lg">
           <p className="text-(--color-text-secondary)">Select two videos and click Compare to view results</p>
         </div>
